@@ -7,7 +7,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
-from segment_anything import sam_model_registry, SamAutomaticMaskGenerator,SamPredictor
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 import open3d as o3d
 from ament_index_python.packages import get_package_share_directory
 
@@ -23,7 +23,7 @@ class FindServer(Node):
 		self.sam.to(device=device)
 		self.mask_generator = SamAutomaticMaskGenerator(self.sam)
 		self.get_logger().info("load sam model")
-		self.server = self.create_service(Boxpoint,'find_server', self.callback_service)
+		self.server = self.create_service(Boxpoint,'find_server', self.callback_service) #server에서 inference
 		self.img_subscriber = self.create_subscription(Image,'/camera/color/image_raw',self.image_callback,10)
 		self.depth_subscriber = self.create_subscription(Image,'/camera/aligned_depth_to_color/image_raw',0)
 		self.cv_bridge = CvBridge()
@@ -73,53 +73,67 @@ class FindServer(Node):
 		# )
 		masks = self.mask_generator.generate(color_image)
 		mask_list = []
+		# 최소 깊이 값을 초기화합니다.
 		depht_avg_min = float('inf')
+		# 박스를 포함한 마스크의 인덱스를 초기화합니다.
 		box_mask_index = None
 		
 		for i in range(len(masks)):
+			# 마스크의 픽셀 수가 특정 범위 내에 있는지 확인하고, 해당 인덱스를 리스트에 추가합니다.
 			if np.count_nonzero(masks[i]["segmentation"]) < 5000 and np.count_nonzero(masks[i]["segmentation"]) > 3000:
 				mask_list.append(i)
 		depth = depth_image.copy()
 		
 		for i in mask_list:
+			# 마스크 내의 depth 값을 가져옵니다.
 			non_zero_depth = depth[masks[i]["segmentation"]]
 			non_zero_depth.sort()
 			size = len(non_zero_depth)
+			# 중앙 50%에 해당하는 깊이의 평균 값을 계산합니다.
 			depht_avg = sum(non_zero_depth[int(size/4):int(size/4*3)]) / size * 2
+			 # 최소 깊이 값을 업데이트하고, 박스를 포함한 마스크의 인덱스를 저장합니다.
 			if depht_avg_min > depht_avg:
 				depht_avg_min = depht_avg
 				box_mask_index = i
 		if box_mask_index is None:
 			self.get_logger().info("NOT detected box")
 			return
-
+		# 박스를 포함하는 부분만 depth 이미지를 가져옵니다.
 		box_depth = np.where(masks[box_mask_index]["segmentation"], depth, 0)
-		
+		# Open3D의 이미지 형식으로 변환합니다.
 		depth_raw = o3d.geometry.Image(box_depth)
 		fx = fy = 30 # X, Y 축에 대한 초점 거리 (임의로 설정)
 		cx = width / 2 # X 축 중심 좌표 (이미지의 중앙)
 		cy = height / 2
-		
+		# 카메라 내부 파라미터를 설정합니다.
 		camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy,cx, cy)
-		
+		# 깊이 이미지로부터 포인트 클라우드를 생성합니다.
 		pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_raw, camera_intrinsic)
 		try:
+			# RANSAC를 사용하여 평면을 추정합니다.
 			plane_model, inliers = pcd.segment_plane(distance_threshold=0.01,ransac_n=3,num_iterations=1000)
 			[a, b, c, d] = plane_model
 			#print(f"Plane equation: {a:.2f}x + {b:.2f}y + {c:.2f}z + {d:.2f} = 0")
+   			# 추정된 평면 위의 점들을 선택합니다.
 			inlier_cloud = pcd.select_by_index(inliers)
 			inlier_cloud.paint_uniform_color([1.0, 0, 0])
 			#outlier_cloud = pcd.select_by_index(inliers, invert=True)
+   			# 바운딩 박스를 생성합니다.
 			obb = inlier_cloud.get_minimal_oriented_bounding_box()
 			obb.color = (0, 1, 0)
+			# 중심 좌표를 가져옵니다.
 			x, y, z = obb.get_center()
+			# depth 값을 업데이트합니다.
 			z = self.depth_point(a, b, c, d, x, y)
+			# 3D 좌표를 이미지 좌표로 변환합니다.
 			x, y, z = self.trans(x, y, z, width, height)
+			 # 이미지에 중심 좌표를 표시합니다.
 			cv2.circle(depth, (int(x), int(y)), 10, 255, -1)
 			cv2.imshow('point_box', box_depth*255)
 		except:
 			self.get_logger().info("ransac fail")
 			pass
+		# 색상 이미지에 박스 영역을 표시합니다.
 		image = color_image
 		image[masks[box_mask_index]["segmentation"]] = [0, 0, 255]
 		cv2.imshow('segment_color_image', image)

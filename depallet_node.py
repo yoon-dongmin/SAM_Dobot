@@ -13,7 +13,7 @@ class DepalletNode(Node):
 		self.find_client = self.create_client(Boxpoint, '/find_server')
 		self.move_client = ActionClient(self, Move, 'move_goal_server')
 		self.home_pose = [245, 5, 50]
-		self.find_pose = [193, -270, 50]
+		self.find_pose = [193, -270, 50] #처음 잡기 위치
 		self.pallet_pose = [193, -270, -50]
 		# x1, y1, x2, y2
 		self.camera_coords = [184, 91, 554, 397]
